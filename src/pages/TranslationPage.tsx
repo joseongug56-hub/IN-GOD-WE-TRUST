@@ -1,0 +1,1187 @@
+
+// pages/TranslationPage.tsx
+// 설정 및 번역 페이지
+
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
+import { Play, Square, Save, Upload, Settings, Zap, Download, RefreshCw, RotateCcw, FileJson, BookOpen, CheckCircle, FileText, Plus, Trash2, User, MessageSquare, Book, Layers } from 'lucide-react';
+import { useSettingsStore } from '../stores/settingsStore';
+import { useTranslationStore } from '../stores/translationStore';
+import { useTranslation } from '../hooks/useTranslation';
+import { FileHandler } from '../utils/fileHandler';
+import { getGeminiClient } from '../services/GeminiClient';
+import { TranslationService } from '../services/TranslationService';
+import { DEFAULT_PREFILL_SYSTEM_INSTRUCTION, DEFAULT_PREFILL_CACHED_HISTORY, DEFAULT_PROMPTS } from '../types/config';
+import { EpubService } from '../services/EpubService';
+import JSZip from 'jszip';
+import { 
+  Button, 
+  Select, 
+  Input, 
+  Slider, 
+  Checkbox, 
+  Textarea, 
+  FileUpload,
+  ProgressBar,
+  SegmentedProgressBar,
+  IconButton
+} from '../components';
+import ThinkingSettings from '../components/common/ThinkingSettings';
+import type { FileContent, TranslationContext } from '../types/dtos';
+import { useGlossaryStore } from '../stores/glossaryStore';
+import { useStoryBibleStore } from '../stores/storyBibleStore'; // [추가] 스토리 바이블 스토어 임포트
+
+/**
+ * 파일 업로드 영역 컴포넌트
+ */
+function FileUploadSection({ onImportSnapshot, mode, onEpubChaptersChange, onModeChange, epubChapters }: { onImportSnapshot: (file: File) => Promise<{ mode: string; epubChapters?: any[] } | void>; mode: 'text' | 'epub'; onEpubChaptersChange: (chapters: any[]) => void; onModeChange: (mode: 'text' | 'epub') => void; epubChapters: any[] }) {
+  const { inputFiles, addInputFiles, removeInputFile, clearInputFiles, addLog } = useTranslationStore();
+  
+  // File 객체를 FileContent로 변환하여 스토어에 추가 또는 스냅샷 복구
+  const handleFilesSelected = useCallback(async (files: File[]) => {
+    const textFiles: any[] = [];
+    let snapshotFound = false;
+    
+    for (const file of files) {
+      // JSON 파일(스냅샷) 감지
+      if (file.name.endsWith('.json')) {
+        addLog('info', `스냅샷 파일 감지: ${file.name}`);
+        const result = await onImportSnapshot(file);
+        // Phase 5: 스냅샷의 모드가 반환되면 자동으로 모드 전환
+        if (result && result.mode) {
+          onModeChange(result.mode as 'text' | 'epub');
+          
+          // EPUB 챕터 정보가 있으면 업데이트
+          if (result.mode === 'epub' && result.epubChapters) {
+             onEpubChaptersChange(result.epubChapters);
+             addLog('info', `📚 EPUB 챕터 정보 복원됨: ${result.epubChapters.length}개`);
+          }
+
+          addLog('info', `📋 모드 자동 변경: ${result.mode}`);
+        }
+        snapshotFound = true;
+        return; 
+      }
+
+      // EPUB 파일 처리
+      if (mode === 'epub' && file.name.endsWith('.epub')) {
+        try {
+          addLog('info', `EPUB 파일 로드 중: ${file.name}`);
+          const epubService = new EpubService();
+          const chapters = await epubService.parseEpubFile(file);
+          
+          onEpubChaptersChange(chapters);
+          addLog('info', `✅ EPUB 파싱 완료: ${chapters.length}개 챕터`);
+          
+          // inputFiles에 원본 파일 정보 저장
+          textFiles.push({
+            name: file.name,
+            content: `[EPUB File] ${chapters.length} chapters loaded`,
+            size: file.size,
+            lastModified: file.lastModified,
+            epubFile: file,
+            epubChapters: chapters,
+            isEpub: true,
+          });
+        } catch (error) {
+          addLog('error', `EPUB 파싱 실패: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      } else if (mode === 'text') {
+        try {
+          const content = await file.text();
+          textFiles.push({
+            name: file.name,
+            content,
+            size: file.size,
+            lastModified: file.lastModified,
+          });
+        } catch (error) {
+          console.error(`파일 읽기 실패: ${file.name}`, error);
+        }
+      }
+    }
+    
+    if (textFiles.length > 0 && !snapshotFound) {
+      addInputFiles(textFiles);
+    }
+  }, [addInputFiles, addLog, mode, onImportSnapshot, onEpubChaptersChange, onModeChange]);
+
+  const handleFileRemove = useCallback((index: number) => {
+    removeInputFile(index);
+    onEpubChaptersChange([]);
+  }, [removeInputFile, onEpubChaptersChange]);
+
+  const handleClearAll = useCallback((e: React.MouseEvent) => {
+    e.preventDefault(); // 기본 이벤트 방지
+    clearInputFiles();
+    onEpubChaptersChange([]);
+  }, [clearInputFiles, onEpubChaptersChange]);
+
+  return (
+    <div className="bg-white rounded-lg shadow p-6">
+      <h2 className="text-xl font-semibold text-gray-800 mb-4 flex items-center gap-2">
+        <Upload className="w-5 h-5" />
+        파일 설정
+      </h2>
+      
+      <FileUpload
+        accept={mode === 'epub' ? ['.epub', '.json'] : ['.txt', '.json']}
+        multiple={mode === 'text'}
+        maxSize={mode === 'epub' ? 100 * 1024 * 1024 : 50 * 1024 * 1024}
+        onFilesSelected={handleFilesSelected}
+        selectedFiles={inputFiles}
+        onFileRemove={handleFileRemove}
+        height="h-32"
+      />
+      <p className="text-xs text-gray-500 mt-2 ml-1">
+        {mode === 'epub' 
+          ? '* EPUB 파일(.epub)을 업로드하여 번역할 수 있습니다.'
+          : '* 텍스트 파일(.txt)을 업로드하여 새 작업을 시작하거나, 작업 파일(.json)을 업로드하여 이어서 진행할 수 있습니다.'}
+      </p>
+
+      {/* EPUB 챕터 정보 */}
+      {epubChapters.length > 0 && (
+        <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+          <p className="text-sm font-semibold text-blue-900 mb-2">
+            📚 로드된 EPUB: {epubChapters.length}개 챕터
+          </p>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+            {epubChapters.map((ch, idx) => (
+              <div key={idx} className="text-xs bg-white p-2 rounded border border-blue-100">
+                <div className="font-semibold text-blue-700">Chapter {idx + 1}</div>
+                <div className="text-gray-600 truncate">{ch.fileName}</div>
+                <div className="text-gray-500">{ch.nodes.length} nodes</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* 전체 삭제 버튼 */}
+      {inputFiles.length > 0 && (
+        <div className="mt-3 flex justify-end">
+          <Button
+            variant="danger"
+            size="sm"
+            onClick={handleClearAll}
+            type="button"
+          >
+            전체 삭제
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ... (PrefillSettingsEditor는 그대로)
+function PrefillSettingsEditor() {
+  const { config, updateConfig } = useSettingsStore();
+
+  const updateHistoryItem = (index: number, text: string) => {
+    const newHistory = [...config.prefillCachedHistory];
+    if (newHistory[index]) {
+      newHistory[index] = { ...newHistory[index], parts: [text] };
+      updateConfig({ prefillCachedHistory: newHistory });
+    }
+  };
+
+  const removeHistoryItem = (index: number) => {
+    const newHistory = config.prefillCachedHistory.filter((_, i) => i !== index);
+    updateConfig({ prefillCachedHistory: newHistory });
+  };
+
+  const addHistoryItem = (role: 'user' | 'model') => {
+    const newHistory = [
+      ...config.prefillCachedHistory,
+      { role, parts: [''] }
+    ];
+    updateConfig({ prefillCachedHistory: newHistory });
+  };
+
+  const addHistoryPair = () => {
+    const newHistory = [
+      ...config.prefillCachedHistory,
+      { role: 'user' as const, parts: [''] },
+      { role: 'model' as const, parts: ['(Confirming instructions...)'] }
+    ];
+    updateConfig({ prefillCachedHistory: newHistory });
+  };
+
+  const handleResetDefaults = () => {
+      updateConfig({
+        prefillSystemInstruction: DEFAULT_PREFILL_SYSTEM_INSTRUCTION,
+        prefillCachedHistory: DEFAULT_PREFILL_CACHED_HISTORY,
+      });
+  };
+
+  return (
+    <div className="mt-4 p-4 bg-blue-50 border border-blue-100 rounded-lg space-y-4 animate-fadeIn">
+      <div className="flex justify-between items-center">
+        <h3 className="text-sm font-semibold text-blue-800 flex items-center gap-2">
+          <Zap className="w-4 h-4" />
+          상세 프리필 설정 (Advanced Multi-turn Prefill)
+        </h3>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={handleResetDefaults}
+          className="text-blue-600 hover:text-blue-800 hover:bg-blue-100 h-8 text-xs"
+        >
+          <RotateCcw className="w-3 h-3 mr-1" />
+          기본값 복원
+        </Button>
+      </div>
+      
+      <Textarea
+        label="시스템 지침 (System Instruction)"
+        value={config.prefillSystemInstruction}
+        onChange={(e) => updateConfig({ prefillSystemInstruction: e.target.value })}
+        rows={6}
+        className="font-mono text-xs"
+        helperText="모델의 역할과 기본적인 번역 규칙을 정의합니다."
+      />
+
+      <div className="space-y-4">
+        <div className="flex items-center justify-between">
+          <label className="text-xs font-semibold text-gray-600 uppercase tracking-wider">
+            대화 히스토리 (Conversation History)
+          </label>
+        </div>
+
+        {config.prefillCachedHistory.map((item, index) => (
+          <div key={index} className="relative group bg-white p-3 rounded-lg border border-blue-100 shadow-sm transition-all hover:shadow-md">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2">
+                {item.role === 'user' ? (
+                  <span className="flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-700 uppercase">
+                    <User className="w-3 h-3" /> User
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-700 uppercase">
+                    <MessageSquare className="w-3 h-3" /> Model
+                  </span>
+                )}
+                <span className="text-[10px] text-gray-400 font-mono">Turn #{index + 1}</span>
+              </div>
+              <IconButton
+                icon={<Trash2 className="w-3.5 h-3.5" />}
+                variant="ghost"
+                size="sm"
+                onClick={() => removeHistoryItem(index)}
+                title="이 대화 삭제"
+                aria-label="Delete turn"
+                className="text-gray-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
+              />
+            </div>
+            <textarea
+              className="w-full text-xs font-mono bg-transparent border-none focus:ring-0 p-0 resize-none min-h-[60px]"
+              value={item.parts[0]}
+              onChange={(e) => updateHistoryItem(index, e.target.value)}
+              placeholder={`${item.role === 'user' ? '사용자 요청' : '모델 응답'} 내용을 입력하세요...`}
+            />
+          </div>
+        ))}
+
+        <div className="flex flex-wrap gap-2 pt-2 border-t border-blue-100">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => addHistoryItem('user')}
+            className="text-blue-600 bg-white hover:bg-blue-50 border border-blue-200 text-xs"
+          >
+            <Plus className="w-3 h-3 mr-1" /> User 추가
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => addHistoryItem('model')}
+            className="text-purple-600 bg-white hover:bg-purple-50 border border-purple-200 text-xs"
+          >
+            <Plus className="w-3 h-3 mr-1" /> Model 추가
+          </Button>
+          <div className="ml-auto">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={addHistoryPair}
+              className="text-gray-600 bg-white border-dashed border-gray-300 text-xs"
+            >
+              <Plus className="w-3 h-3 mr-1" /> 대화 쌍(Pair) 추가
+            </Button>
+          </div>
+        </div>
+      </div>
+      
+      <div className="text-xs text-blue-600 bg-blue-100 p-2 rounded">
+        💡 <strong>Tip:</strong> 이 설정은 번역 요청 이전에 모델에게 '이전 대화'로 주입됩니다. 다중 턴 설정을 통해 번역 스타일을 더 정교하게 조율할 수 있습니다.
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 번역 설정 컴포넌트
+ */
+function TranslationSettings({ mode }: { mode: 'text' | 'epub' }) {
+  const { config, updateConfig } = useSettingsStore();
+  const { translationMode } = useTranslationStore();
+  const [modelOptions, setModelOptions] = useState<{ value: string; label: string }[]>([]);
+  const [isLoadingModels, setIsLoadingModels] = useState(false);
+
+  // 모델 목록 로드
+  useEffect(() => {
+    const fetchModels = async () => {
+      setIsLoadingModels(true);
+      try {
+        const client = getGeminiClient();
+        const models = await client.getAvailableModels();
+        const options = models.map(model => ({
+          value: model,
+          label: model
+        }));
+
+        if (config.modelName && !models.includes(config.modelName)) {
+          options.unshift({ value: config.modelName, label: config.modelName });
+        }
+
+        setModelOptions(options);
+      } catch (error) {
+        console.error('모델 목록 불러오기 실패:', error);
+        setModelOptions([
+          { value: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash' },
+          { value: 'gemini-2.0-flash-lite-preview-02-05', label: 'Gemini 2.0 Flash Lite' },
+          { value: 'gemini-1.5-pro', label: 'Gemini 1.5 Pro' },
+          { value: 'gemini-1.5-flash', label: 'Gemini 1.5 Flash' },
+        ]);
+      } finally {
+        setIsLoadingModels(false);
+      }
+    };
+
+    fetchModels();
+  }, [config.modelName]);
+
+  return (
+    <div className="bg-white rounded-lg shadow p-6">
+      <h2 className="text-xl font-semibold text-gray-800 mb-4 flex items-center gap-2">
+        <Settings className="w-5 h-5" />
+        번역 설정 ({mode === 'text' ? '텍스트 모드' : 'EPUB 모드'})
+      </h2>
+      
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {/* === 공통 설정: 모델 선택 === */}
+        <div className="md:col-span-2">
+          <Select
+            label={isLoadingModels ? "모델 (목록 로딩 중...)" : "모델"}
+            value={config.modelName}
+            onChange={(e: React.ChangeEvent<HTMLSelectElement>) => updateConfig({ modelName: e.target.value })}
+            options={modelOptions}
+            disabled={isLoadingModels}
+          />
+        </div>
+
+        {/* === Thinking 모델 설정 === */}
+        <div className="md:col-span-2">
+          <ThinkingSettings />
+        </div>
+
+        {/* === 동적 UI 분기점 === */}
+        
+        {/* Case 1: 텍스트 모드 전용 설정 */}
+        {mode === 'text' && (
+          <div className="md:col-span-2 p-4 bg-gray-50 border border-gray-200 rounded-lg">
+             <div className="flex items-center gap-2 mb-3">
+                <FileText className="w-4 h-4 text-blue-600" />
+                <h3 className="font-medium text-gray-800">텍스트 분할 설정</h3>
+             </div>
+             <Input
+              type="number"
+              label="청크 크기 (Chunk Size)"
+              value={config.chunkSize}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => updateConfig({ chunkSize: parseInt(e.target.value) || 6000 })}
+              min={1000}
+              max={50000}
+              step={1000}
+              helperText="한 번에 번역할 최대 글자 수입니다. 문맥 유지를 위해 적절한 크기를 설정하세요."
+            />
+            {/* [추가] 슬라이딩 문맥 설정 UI */}
+            <div className="mt-4 pt-4 border-t border-gray-200">
+               <Checkbox
+                  label="이전 문맥 참조 (Sliding Context Window)"
+                  checked={config.enableSlidingWindow}
+                  onChange={(e) => updateConfig({ enableSlidingWindow: e.target.checked })}
+                  description="번역 품질(대명사, 어조) 향상을 위해 직전 청크의 원문 뒷부분을 참조합니다."
+               />
+               {config.enableSlidingWindow && (
+                  <div className="mt-2 ml-6">
+                     <Input
+                        type="number"
+                        label="참조 크기 (글자 수)"
+                        value={config.slidingWindowSize}
+                        onChange={(e) => updateConfig({ slidingWindowSize: parseInt(e.target.value) || 600 })}
+                        min={100}
+                        max={2000}
+                        step={100}
+                        className="max-w-[200px]"
+                        helperText="이전 청크의 끝부분에서 가져올 글자 수입니다 (권장: 500~1000자)."
+                     />
+                  </div>
+               )}
+            </div>
+
+            {translationMode === 'integrity' && (
+              <div className="mt-4 pt-4 border-t border-gray-200">
+                <Input
+                  type="number"
+                  label="청크당 최대 노드 수 (무결성 모드)"
+                  value={config.epubMaxNodesPerChunk}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => updateConfig({ epubMaxNodesPerChunk: parseInt(e.target.value) || 30 })}
+                  min={5}
+                  max={100}
+                  helperText="줄 단위 무결성 텍스트 번역 시 한 번에 묶을 최대 라인 개수입니다. 값이 크면 JSON 구조 오류가 발생할 수 있습니다."
+                />
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Case 2: EPUB 모드 전용 설정 */}
+        {mode === 'epub' && (
+          <div className="md:col-span-2 space-y-4">
+            {/* EPUB 주요 파라미터: 노드 개수 */}
+            <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
+                <div className="flex items-center gap-2 mb-3">
+                    <BookOpen className="w-4 h-4 text-blue-600" />
+                    <h3 className="font-medium text-blue-900">EPUB 구조 설정 (주요 파라미터)</h3>
+                </div>
+                <Input
+                    type="number"
+                    label="청크당 최대 노드 수 (Max Nodes per Chunk)"
+                    value={config.epubMaxNodesPerChunk}
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => updateConfig({ epubMaxNodesPerChunk: parseInt(e.target.value) || 30 })}
+                    min={5}
+                    max={100}
+                    helperText="한 번에 묶어서 보낼 최대 문단(HTML 태그) 개수입니다. JSON 구조 오류를 방지하려면 이 값을 조절하세요."
+                />
+                
+                {/* [추가] EPUB 모드에서도 슬라이딩 문맥 설정 제공 */}
+                <div className="mt-4 pt-4 border-t border-blue-200">
+                   <Checkbox
+                      label="이전 문맥 참조 (Sliding Context Window)"
+                      checked={config.enableSlidingWindow}
+                      onChange={(e) => updateConfig({ enableSlidingWindow: e.target.checked })}
+                      description="직전 청크의 내용을 참조하여 문맥 연결성을 개선합니다."
+                   />
+                   {config.enableSlidingWindow && (
+                      <div className="mt-2 ml-6">
+                         <Input
+                            type="number"
+                            label="참조 크기 (글자 수)"
+                            value={config.slidingWindowSize}
+                            onChange={(e) => updateConfig({ slidingWindowSize: parseInt(e.target.value) || 600 })}
+                            min={100}
+                            max={2000}
+                            step={100}
+                            className="max-w-[200px]"
+                         />
+                      </div>
+                   )}
+                </div>
+            </div>
+
+            {/* EPUB 보조 파라미터: 글자 수 제한 */}
+            <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg">
+                 <div className="flex items-center gap-2 mb-3">
+                    <Zap className="w-4 h-4 text-gray-500" />
+                    <h3 className="font-medium text-gray-600">안전 장치 (Safety Limit)</h3>
+                </div>
+                <Input
+                    type="number"
+                    label="최대 글자 수 제한 (Character Limit)"
+                    value={config.chunkSize}
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => updateConfig({ chunkSize: parseInt(e.target.value) || 6000 })}
+                    min={1000}
+                    max={50000}
+                    step={1000}
+                    helperText="노드 개수가 적더라도 글자 수가 이 값을 넘으면 강제로 분할합니다. (토큰 제한 방지)"
+                />
+            </div>
+          </div>
+        )}
+
+        {/* === 공통 고급 설정 === */}
+        <div className="md:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-4 pt-4 border-t">
+            {/* Temperature */}
+            <Slider
+              label="창의성 (Temperature)"
+              value={config.temperature}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => updateConfig({ temperature: parseFloat(e.target.value) })}
+              min={0}
+              max={2}
+              step={0.1}
+              formatValue={(v: number) => v.toFixed(1)}
+            />
+
+            {/* RPM */}
+            <Input
+              type="number"
+              label="분당 요청 수 (RPM)"
+              value={config.requestsPerMinute}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => updateConfig({ requestsPerMinute: parseFloat(e.target.value) || 10 })}
+              min={1}
+              max={100}
+            />
+            
+            {/* Max Workers */}
+            <div className="md:col-span-2">
+                <Input
+                  type="number"
+                  label="동시 작업 수 (Max Workers)"
+                  value={config.maxWorkers || 1}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => updateConfig({ maxWorkers: Math.max(1, parseInt(e.target.value) || 1) })}
+                  min={1}
+                  max={20}
+                  helperText="병렬 처리 개수입니다. 속도는 빨라지지만 브라우저 부하가 늘어날 수 있습니다."
+                />
+            </div>
+        </div>
+
+        {/* EPUB 모드일 때만 이미지 주석 옵션 표시 */}
+        {mode === 'epub' && (
+            <div className="md:col-span-2">
+              <Checkbox
+                  label="EPUB 이미지 AI 주석 생성 (Image Annotation)"
+                  checked={config.enableImageAnnotation}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => updateConfig({ enableImageAnnotation: e.target.checked })}
+                  description="이미지를 분석하여 텍스트 설명을 추가합니다. (Gemini Vision 모델 필요)"
+              />
+            </div>
+        )}
+        
+        {/* 텍스트/EPUB 공통 옵션 */}
+        <div className="md:col-span-2">
+             <Checkbox
+                label="프리필 번역 모드 사용 (Prefill Translation)"
+                checked={config.enablePrefillTranslation}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => updateConfig({ enablePrefillTranslation: e.target.checked })}
+                description="더 자연스러운 번역을 위해 사전 학습된 컨텍스트(페르소나)를 사용합니다."
+             />
+             {config.enablePrefillTranslation && <PrefillSettingsEditor />}
+             
+             <div className="mt-4">
+                <Checkbox
+                    label="동적 용어집 주입 (Dynamic Glossary Injection)"
+                    checked={config.enableDynamicGlossaryInjection}
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => updateConfig({ enableDynamicGlossaryInjection: e.target.checked })}
+                    description="번역 시 용어집 항목을 프롬프트에 자동으로 포함합니다."
+                />
+                
+                {config.enableDynamicGlossaryInjection && (
+                  <div className="mt-4 p-4 bg-gray-50 border border-gray-200 rounded-lg space-y-4 animate-fadeIn">
+                    <div className="flex items-center gap-2 mb-2">
+                      <Settings className="w-4 h-4 text-gray-500" />
+                      <h3 className="text-sm font-semibold text-gray-700">용어집 주입 상세 설정</h3>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <Input
+                        type="number"
+                        label="청크당 최대 주입 항목 수"
+                        value={config.maxGlossaryEntriesPerChunkInjection}
+                        onChange={(e) => updateConfig({ maxGlossaryEntriesPerChunkInjection: parseInt(e.target.value) || 0 })}
+                        min={0}
+                        helperText="한 번의 번역 요청에 포함할 최대 용어 수입니다."
+                      />
+                      <Input
+                        type="number"
+                        label="청크당 최대 주입 글자 수"
+                        value={config.maxGlossaryCharsPerChunkInjection}
+                        onChange={(e) => updateConfig({ maxGlossaryCharsPerChunkInjection: parseInt(e.target.value) || 0 })}
+                        min={0}
+                        helperText="용어집 컨텍스트가 차지할 수 있는 최대 글자 수입니다."
+                      />
+                    </div>
+                    <div className="text-xs text-gray-500">
+                      * 프롬프트 길이 제한을 초과하지 않도록 적절한 값을 설정하세요. 설정된 제한을 넘는 경우 등장 빈도가 높은 순으로 잘립니다.
+                    </div>
+                  </div>
+                )}
+             </div>
+
+             {/* 스토리 바이블 ON/OFF 설정 */}
+             <div className="mt-4 p-4 bg-blue-50/50 border border-blue-100 rounded-lg">
+                <div className="flex items-center gap-2 mb-2">
+                   <Book className="w-4 h-4 text-blue-600" />
+                   <h3 className="text-sm font-semibold text-blue-900">스토리 바이블 설정</h3>
+                </div>
+                <Checkbox
+                    label="스토리 바이블 주입 (Story Bible Injection)"
+                    checked={config.enableStoryBibleInjection}
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => updateConfig({ enableStoryBibleInjection: e.target.checked })}
+                    description="추출된 인물, 세계관, 스타일 정보를 번역 컨텍스트에 포함하여 일관성을 유지합니다."
+                />
+             </div>
+        </div>
+
+      </div>
+    </div>
+  );
+}
+
+// ... (PromptSettings, ProgressSection, ResultPreview 등 나머지 컴포넌트는 기존 코드 유지)
+/**
+ * 프롬프트 설정 컴포넌트
+ */
+function PromptSettings() {
+  const { config, updateConfig } = useSettingsStore();
+  const [isExpanded, setIsExpanded] = useState(false);
+
+  const handleResetDefaults = useCallback(() => {
+      updateConfig({ prompts: DEFAULT_PROMPTS });
+  }, [updateConfig]);
+
+  return (
+    <div className="bg-white rounded-lg shadow p-6">
+      <div className="flex justify-between items-center">
+        <button
+          onClick={() => setIsExpanded(!isExpanded)}
+          className="w-full flex justify-between items-center text-xl font-semibold text-gray-800"
+        >
+          <span>📝 번역 프롬프트 템플릿</span>
+          <span className="text-gray-400">{isExpanded ? '▲' : '▼'}</span>
+        </button>
+
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={(e) => {
+            e.stopPropagation();
+            handleResetDefaults();
+          }}
+          className="text-gray-500 hover:text-gray-700 hover:bg-gray-100 text-xs flex-shrink-0"
+          title="기본값으로 복원"
+        >
+          <RotateCcw className="w-4 h-4 mr-1" />
+          기본값 복원
+        </Button>
+        </div>
+      
+      {isExpanded && (
+        <div className="mt-4">
+          <Textarea
+            label="메인 번역 프롬프트"
+            value={config.prompts}
+            onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => updateConfig({ prompts: e.target.value })}
+            rows={10}
+            helperText="사용 가능한 플레이스홀더: {{slot}} (원문), {{glossary_context}} (용어집), {{story_bible}} (스토리 바이블), {{previous_context_section}} (이전 문맥)"
+            className="font-mono text-sm"
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+const formatTime = (seconds?: number) => {
+  if (seconds === undefined || seconds < 0) return '--:--';
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  return `${mins}분 ${secs.toString().padStart(2, '0')}초`;
+};
+
+function ProgressSection() {
+  const { isRunning, progress } = useTranslationStore();
+
+  if (!isRunning && !progress) return null;
+
+  const percentage = progress?.totalChunks
+    ? Math.round((progress.processedChunks / progress.totalChunks) * 100)
+    : 0;
+
+  return (
+    <div className="bg-white rounded-lg shadow p-6">
+       <div className="flex justify-between items-end mb-2">
+        <span className="text-sm font-medium text-gray-700">
+           {progress?.currentStatusMessage || '준비 중...'}
+        </span>
+        
+        {isRunning && progress?.etaSeconds !== undefined && (
+          <span className="text-sm font-mono text-blue-600 bg-blue-50 px-2 py-1 rounded">
+            남은 시간: {formatTime(progress.etaSeconds)}
+          </span>
+        )}
+      </div>
+
+      <ProgressBar
+        value={percentage}
+        showPercentage
+        detail={progress ? `${progress.processedChunks}/${progress.totalChunks}` : undefined}
+        color="primary"
+        height="lg"
+        striped={isRunning}
+        animated={isRunning}
+      />
+      
+      {progress && (
+        <div className="mt-4">
+          <SegmentedProgressBar
+            segments={[
+              { value: progress.successfulChunks, color: 'success', label: '성공' },
+              { value: progress.failedChunks, color: 'danger', label: '실패' },
+              { value: progress.totalChunks - progress.processedChunks, color: 'gray', label: '대기' },
+            ]}
+            total={progress.totalChunks}
+            showLegend
+            height="sm"
+          />
+        </div>
+      )}
+      
+      {progress?.lastErrorMessage && (
+        <div className="bg-red-50 text-red-700 p-3 rounded mt-3 text-sm">
+          마지막 오류: {progress.lastErrorMessage}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const PREVIEW_MAX_LENGTH = 3000;
+
+function ResultPreview({ mode }: { mode: 'text' | 'epub' }) {
+  const { translatedText, results } = useTranslationStore();
+
+  const previewText = useMemo(() => {
+    if (translatedText.length <= PREVIEW_MAX_LENGTH) {
+      return translatedText;
+    }
+    return translatedText.slice(0, PREVIEW_MAX_LENGTH) + 
+      `\n\n... (전체 내용은 ${translatedText.length.toLocaleString()}자입니다. 아래 '결과 다운로드' 버튼을 이용하세요)`;
+  }, [translatedText]);
+
+  if (!translatedText && results.length === 0) return null;
+  if (mode === 'epub') return null;
+
+  const successCount = results.filter((r: { success: boolean }) => r.success).length;
+  const failCount = results.filter((r: { success: boolean }) => !r.success).length;
+
+  return (
+    <>
+      {results.length > 0 && (
+        <div className="flex gap-4 mb-3 text-sm">
+          <span className="text-gray-600">
+            총 {results.length}개 청크
+          </span>
+          <span className="text-green-600">
+            ✓ 성공: {successCount}
+          </span>
+          {failCount > 0 && (
+            <span className="text-red-600">
+              ✗ 실패: {failCount}
+            </span>
+          )}
+        </div>
+      )}
+      
+      <div className="bg-gray-50 rounded-lg p-4 max-h-64 overflow-y-auto">
+        <pre className="whitespace-pre-wrap text-sm text-gray-700">
+          {previewText || '번역 결과가 여기에 표시됩니다...'}
+        </pre>
+      </div>
+      
+      <div className="flex justify-between items-center mt-2 text-sm text-gray-500">
+        <span>총 {translatedText.length.toLocaleString()}자</span>
+        {translatedText.length > PREVIEW_MAX_LENGTH && (
+          <span className="text-orange-600 bg-orange-50 px-2 py-1 rounded text-xs">
+            ⚠️ 성능을 위해 일부만 미리보기로 표시됩니다.
+          </span>
+        )}
+      </div>
+    </>
+  );
+}
+
+/**
+ * 설정 및 번역 페이지 메인 컴포넌트
+ */
+export function TranslationPage() {
+  const { config, exportConfig } = useSettingsStore();
+  const { entries: glossaryEntries } = useGlossaryStore();
+  const { data: storyBibleData } = useStoryBibleStore(); 
+  const { addLog, results, translatedText, addResult, translationMode, setTranslationMode } = useTranslationStore();
+  const [mode, setMode] = useState<'text' | 'epub'>('text');
+  const [epubChapters, setEpubChapters] = useState<any[]>([]);
+  
+  const [epubDownloadUrl, setEpubDownloadUrl] = useState<string | null>(null);
+  const [epubDownloadName, setEpubDownloadName] = useState<string>('');
+  const [isEpubTranslating, setIsEpubTranslating] = useState(false);
+  
+  const epubServiceRef = React.useRef<TranslationService | null>(null);
+
+  const {
+    inputFiles,
+    isRunning,
+    hasFailedChunks,
+    canStart,
+    canStop,
+    executeTranslation,
+    cancelTranslation,
+    retryFailedChunks,
+    exportSnapshot,
+    importSnapshot,
+    downloadResult,
+  } = useTranslation();
+
+  const handleStartTranslation = useCallback(async () => {
+    setEpubDownloadUrl(null);
+    setEpubDownloadName('');
+
+    if (mode === 'epub') {
+      setIsEpubTranslating(true);
+      const epubFile: any = inputFiles[0];
+      if (epubFile && epubFile.isEpub && epubFile.epubFile) {
+        addLog('info', `🚀 [단계 1/4] EPUB 번역 작업을 시작합니다: ${epubFile.name}`);
+        
+        try {
+          const translationService = new TranslationService(config);
+          epubServiceRef.current = translationService;
+          
+          let zip: JSZip | undefined;
+          if (config.enableImageAnnotation) {
+            addLog('info', '🖼️ 이미지 주석 생성을 위해 EPUB 이미지를 로드합니다.');
+            try {
+              zip = await JSZip.loadAsync(epubFile.epubFile);
+            } catch (e) {
+              addLog('warning', '이미지 로드 실패. 주석 생성 없이 진행합니다.');
+            }
+          }
+
+          addLog('info', `📖 [단계 2/4] 텍스트 번역을 시작합니다. (청크 크기: ${config.chunkSize})`);
+
+          const context: TranslationContext = { 
+            glossaryEntries,
+            storyBible: storyBibleData || undefined 
+          };
+          
+          if (storyBibleData) {
+             addLog('info', '📘 EPUB 번역에 스토리 바이블 컨텍스트가 적용됩니다.');
+          }
+
+          const translatedNodes = await translationService.translateEpubNodes(
+            epubFile.epubChapters.flatMap((ch: any) => ch.nodes),
+            context,
+            (progress: any) => {
+              // progress handling
+            },
+            (result) => {
+              addResult(result);
+            },
+            zip,
+            results 
+          );
+
+          addLog('info', '📚 [단계 3/4] 번역된 데이터를 EPUB 포맷으로 재조립합니다.');
+
+          const sampleNode = translatedNodes.find(n => n.type === 'text' && n.content?.trim().length > 0);
+          if (sampleNode) {
+             addLog('info', `🔍 번역 데이터 검증 (샘플): ID=${sampleNode.id}, 내용=${sampleNode.content?.substring(0, 30)}...`);
+          } else {
+             addLog('warning', '⚠️ 번역된 텍스트 노드를 찾을 수 없습니다!');
+          }
+
+          const epubService = new EpubService();
+          const translatedChapters = epubFile.epubChapters.map((chapter: any) => ({
+            ...chapter,
+            nodes: [] as any[]
+          }));
+
+          let currentChapterIndex = 0;
+          
+          for (const node of translatedNodes) {
+            let currentChapter = translatedChapters[currentChapterIndex];
+            const expectedPrefix = `${currentChapter.fileName}_`;
+            
+            if (!node.id.startsWith(expectedPrefix)) {
+              let foundNext = false;
+              for (let i = currentChapterIndex + 1; i < translatedChapters.length; i++) {
+                if (node.id.startsWith(`${translatedChapters[i].fileName}_`)) {
+                  currentChapterIndex = i;
+                  currentChapter = translatedChapters[i];
+                  foundNext = true;
+                  break;
+                }
+              }
+            }
+            translatedChapters[currentChapterIndex].nodes.push(node);
+          }
+
+          const epubBlob = await epubService.generateEpubBlob(epubFile.epubFile, translatedChapters);
+          const url = URL.createObjectURL(epubBlob);
+          const downloadName = `${epubFile.name.replace('.epub', '')}_translated.epub`;
+          
+          setEpubDownloadUrl(url);
+          setEpubDownloadName(downloadName);
+
+          addLog('info', `✅ [단계 4/4] 모든 작업이 완료되었습니다! 아래 '결과 다운로드' 버튼을 눌러 파일을 저장하세요.`);
+
+        } catch (error) {
+          addLog('error', `❌ 작업 실패: ${error instanceof Error ? error.message : String(error)}`);
+        } finally {
+          setIsEpubTranslating(false);
+        }
+      } else {
+        setIsEpubTranslating(false);
+      }
+    } else {
+      executeTranslation();
+    }
+  }, [mode, inputFiles, executeTranslation, addLog, config, storyBibleData, glossaryEntries, results]);
+
+  const handleStopTranslation = useCallback(() => {
+    if (mode === 'epub') {
+      if (epubServiceRef.current) {
+        epubServiceRef.current.requestStop();
+        addLog('warning', 'EPUB 번역이 사용자에 의해 중단되었습니다.');
+      }
+      setIsEpubTranslating(false);
+    } else {
+      cancelTranslation();
+    }
+  }, [mode, cancelTranslation, addLog]);
+
+  const handleRetryFailed = useCallback(() => {
+    retryFailedChunks();
+  }, [retryFailedChunks]);
+
+  const handleExportSettings = useCallback(() => {
+    exportConfig();
+    addLog('info', '설정이 저장되었습니다.');
+  }, [exportConfig, addLog]);
+
+  return (
+    <div className="space-y-6 fade-in">
+      {/* 모드 선택 */}
+      <div className="bg-white rounded-lg shadow p-6">
+        <h2 className="text-xl font-semibold text-gray-800 mb-4 flex items-center gap-2">
+          <Settings className="w-5 h-5" />
+          번역 모드 선택
+        </h2>
+        
+        <div className="flex gap-6">
+          <label className="flex items-center gap-3 cursor-pointer">
+            <input
+              type="radio"
+              name="mode"
+              value="text"
+              checked={mode === 'text'}
+              onChange={(e) => setMode(e.target.value as 'text' | 'epub')}
+              className="w-4 h-4 accent-blue-600"
+            />
+            <span className="flex items-center gap-2 text-gray-700 font-medium">
+              📝 텍스트 번역
+            </span>
+            <span className="text-xs text-gray-500">(일반 텍스트 파일)</span>
+          </label>
+          
+          <label className="flex items-center gap-3 cursor-pointer">
+            <input
+              type="radio"
+              name="mode"
+              value="epub"
+              checked={mode === 'epub'}
+              onChange={(e) => setMode(e.target.value as 'text' | 'epub')}
+              className="w-4 h-4 accent-blue-600"
+            />
+            <span className="flex items-center gap-2 text-gray-700 font-medium">
+              <BookOpen className="w-4 h-4" />
+              EPUB 번역
+            </span>
+            <span className="text-xs text-gray-500">(전자책 파일)</span>
+          </label>
+        </div>
+        
+        {mode === 'text' && (
+          <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+            <label className="flex items-start gap-3 p-3 border rounded-lg cursor-pointer hover:border-blue-400 transition-colors">
+              <input
+                type="radio"
+                name="translation-quality-mode"
+                value="basic"
+                checked={translationMode === 'basic'}
+                onChange={() => setTranslationMode('basic')}
+                className="mt-1 w-4 h-4 accent-blue-600"
+              />
+              <div>
+                <div className="flex items-center gap-2 text-gray-800 font-semibold">
+                  🏃 기본 모드 (자유 번역)
+                </div>
+                <p className="text-sm text-gray-600">
+                  자연스러운 표현 중심. 극대화된 유창성, 약간의 축약 가능성.
+                </p>
+              </div>
+            </label>
+
+            <label className="flex items-start gap-3 p-3 border rounded-lg cursor-pointer hover:border-blue-400 transition-colors">
+              <input
+                type="radio"
+                name="translation-quality-mode"
+                value="integrity"
+                checked={translationMode === 'integrity'}
+                onChange={() => setTranslationMode('integrity')}
+                className="mt-1 w-4 h-4 accent-blue-600"
+              />
+              <div>
+                <div className="flex items-center gap-2 text-gray-800 font-semibold">
+                  🔒 무결성 모드 (줄 단위)
+                </div>
+                <p className="text-sm text-gray-600">
+                  줄 단위 노드로 구조를 보존하고 누락을 차단합니다. 법률/기술 문서에 권장.
+                </p>
+              </div>
+            </label>
+          </div>
+        )}
+
+        {mode === 'epub' && (
+          <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-800">
+            💡 <strong>EPUB 모드</strong>에서는 전자책 파일을 업로드하면 자동으로 파싱되고, 번역 후 새로운 EPUB 파일로 다운로드됩니다.
+          </div>
+        )}
+      </div>
+      
+      {/* 파일 업로드 (모드에 따라 다른 UI) */}
+      <FileUploadSection onImportSnapshot={importSnapshot} mode={mode} onEpubChaptersChange={setEpubChapters} onModeChange={setMode} epubChapters={epubChapters} />
+      
+      {/* 번역 설정 */}
+      <TranslationSettings mode={mode} />
+      
+      {/* 프롬프트 설정 */}
+      <PromptSettings />
+      
+      {/* 진행률 */}
+      <ProgressSection />
+      
+      {/* 결과 미리보기 및 다운로드 */}
+      <div className="bg-white rounded-lg shadow p-6">
+        <div className="flex justify-between items-center mb-4">
+          <h2 className="text-xl font-semibold text-gray-800">
+            {mode === 'epub' ? '📚 EPUB 작업 결과' : '📄 번역 결과'}
+          </h2>
+          <div className="flex gap-2">
+            {mode !== 'epub' && results.length > 0 && (
+              <Button
+                variant="outline"
+                size="sm"
+                leftIcon={<FileJson className="w-4 h-4" />}
+                onClick={() => exportSnapshot()}
+                title="현재 진행 상황을 파일로 저장하여 나중에 이어할 수 있습니다."
+              >
+                작업 저장
+              </Button>
+            )}
+            {mode === 'epub' && results.length > 0 && (
+              <Button
+                variant="outline"
+                size="sm"
+                leftIcon={<FileJson className="w-4 h-4" />}
+                onClick={() => exportSnapshot()}
+                title="EPUB 번역 진행 상황을 파일로 저장하여 나중에 이어할 수 있습니다."
+              >
+                작업 저장
+              </Button>
+            )}
+            {mode !== 'epub' && (
+              <Button
+                variant="primary"
+                size="sm"
+                leftIcon={<Download className="w-4 h-4" />}
+                onClick={() => downloadResult()}
+                disabled={!translatedText}
+              >
+                결과 다운로드
+              </Button>
+            )}
+          </div>
+        </div>
+
+        {mode === 'epub' ? (
+          <div className="text-center py-8">
+            {epubDownloadUrl ? (
+              <div className="space-y-4 animate-fadeIn">
+                <div className="w-16 h-16 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto">
+                  <CheckCircle className="w-8 h-8" />
+                </div>
+                <h3 className="text-lg font-medium text-gray-900">번역이 완료되었습니다!</h3>
+                <p className="text-gray-500">파일이 준비되었습니다. 아래 버튼을 눌러 저장하세요.</p>
+                
+                <a 
+                  href={epubDownloadUrl} 
+                  download={epubDownloadName}
+                  className="inline-flex items-center gap-2 px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors font-medium shadow-sm"
+                >
+                  <Download className="w-5 h-5" />
+                  {epubDownloadName} 다운로드
+                </a>
+              </div>
+            ) : (
+              <p className="text-gray-500">
+                {isRunning || isEpubTranslating ? 'EPUB 번역이 진행 중입니다... 로그 탭을 확인하세요.' : '번역을 시작하면 결과가 여기에 표시됩니다.'}
+              </p>
+            )}
+          </div>
+        ) : (
+          <ResultPreview mode={mode} />
+        )}
+      </div>
+      
+      {/* 액션 버튼 */}
+      <div className="flex gap-4">
+        {!isRunning && !isEpubTranslating ? (
+          <>
+            <Button
+              variant="primary"
+              size="lg"
+              className="flex-1"
+              disabled={!canStart || isEpubTranslating}
+              loading={isEpubTranslating}
+              leftIcon={<Play className="w-5 h-5" />}
+              onClick={handleStartTranslation}
+            >
+              {mode === 'epub' ? 'EPUB 번역 시작' : '번역 시작 (또는 이어하기)'}
+            </Button>
+            
+            {hasFailedChunks && (
+              <Button
+                variant="secondary"
+                size="lg"
+                leftIcon={<RefreshCw className="w-5 h-5" />}
+                onClick={handleRetryFailed}
+              >
+                실패 재시도
+              </Button>
+            )}
+          </>
+        ) : (
+          <Button
+            variant="danger"
+            size="lg"
+            className="flex-1"
+            leftIcon={<Square className="w-5 h-5" />}
+            onClick={handleStopTranslation}
+          >
+            번역 중지
+          </Button>
+        )}
+        
+        <Button
+          variant="outline"
+          size="lg"
+          leftIcon={<Save className="w-5 h-5" />}
+          onClick={handleExportSettings}
+          className="whitespace-nowrap shrink-0"
+        >
+          설정 저장
+        </Button>
+      </div>
+    </div>
+  );
+}
